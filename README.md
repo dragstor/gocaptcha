@@ -284,6 +284,24 @@ Tip: If you mount under "/static-js/", use <script src="/static-js/gocaptcha.js"
 
 ---
 
+## Real client IP behind reverse proxies (Caddy/Nginx/Cloudflare)
+
+If your app runs behind a reverse proxy, r.RemoteAddr will typically be the proxy's IP (e.g., 127.0.0.1). To record and rate‑limit by the actual client IP, enable TrustProxyHeaders in the config:
+
+```go
+cap := gocaptcha.New(gocaptcha.Config{
+    EnableStorage:     true,
+    TrustProxyHeaders: true, // read Forwarded / X-Forwarded-For / X-Real-IP / CF-Connecting-IP
+})
+```
+
+Notes:
+- Only enable this when your app is behind a trusted proxy that sets those headers correctly. Do not expose your app directly to the internet with this flag on, otherwise clients could spoof their IP.
+- Caddy and Nginx set X-Forwarded-For by default. Cloudflare sets CF-Connecting-IP.
+- No other changes are necessary for Caddy in typical setups: the library will pick the left‑most valid IP from X-Forwarded-For.
+
+---
+
 ## Configuration reference
 
 Config fields (gocaptcha.Config):
@@ -295,6 +313,7 @@ Config fields (gocaptcha.Config):
 - EnableStorage bool — enable SQLite logs and automatic seeding
 - DBPath string — path to SQLite db (defaults to captcha.db when empty)
 - BlockThreshold int — block if score <= threshold (default -5)
+- TrustProxyHeaders bool — when true, use real client IP from proxy headers (Forwarded, X-Forwarded-For, X-Real-IP, CF-Connecting-IP). Enable only when behind a trusted reverse proxy (e.g., Caddy/Nginx/Cloudflare).
 - SkipPaths []string — path prefixes to bypass checks (e.g., "/auth/", "/oauth2/")
 - SkipIf func(*http.Request) bool — custom bypass logic (e.g., OAuth callback detection)
 

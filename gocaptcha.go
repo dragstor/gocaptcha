@@ -33,6 +33,11 @@ type Config struct {
 	DBPath         string
 	BlockThreshold int // Decision threshold (score <= BlockThreshold => block). If 0, defaults to -5 for backward compatibility.
 
+	// When true, attempts to determine the real client IP from proxy headers
+	// (Forwarded, X-Forwarded-For, X-Real-IP). Only enable this if your app is
+	// behind a trusted reverse proxy that sets these headers correctly.
+	TrustProxyHeaders bool
+
 	// Optional bypass controls to exclude certain requests (e.g., OAuth callbacks) from checks.
 	SkipPaths []string                   // Any request whose URL.Path has one of these prefixes will bypass checks.
 	SkipIf    func(r *http.Request) bool // If provided and returns true, the request bypasses checks.
@@ -109,11 +114,7 @@ func (c *Captcha) CheckRequest(r *http.Request) bool {
 		return true // suspicious if malformed form data
 	}
 
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	ip := host
+	ip := c.clientIP(r)
 	ua := r.Header.Get("User-Agent")
 	ref := r.Header.Get("Referer")
 	now := time.Now()
@@ -274,6 +275,92 @@ func (c *Captcha) threshold() int {
 		return -5
 	}
 	return c.cfg.BlockThreshold
+}
+
+// clientIP returns the best-effort client IP for this request.
+// If TrustProxyHeaders is enabled, it will try standard reverse-proxy headers
+// in this order: Forwarded (RFC 7239), X-Forwarded-For, X-Real-IP.
+// Falls back to r.RemoteAddr if none are present/valid.
+func (c *Captcha) clientIP(r *http.Request) string {
+	// Start with RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := host
+
+	if !c.cfg.TrustProxyHeaders {
+		return ip
+	}
+
+	// 1) Forwarded: for=...
+	if fwd := r.Header.Get("Forwarded"); fwd != "" {
+		// Multiple entries separated by commas; each entry can have key=value; pairs
+		entries := strings.Split(fwd, ",")
+		for _, entry := range entries {
+			parts := strings.Split(entry, ";")
+			for _, part := range parts {
+				kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+				if len(kv) != 2 {
+					continue
+				}
+				if strings.ToLower(strings.TrimSpace(kv[0])) != "for" {
+					continue
+				}
+				v := strings.TrimSpace(kv[1])
+				v = strings.Trim(v, "\"") // strip quotes
+				v = strings.Trim(v, "[]")   // strip IPv6 brackets if present
+				// Might include port
+				if h, _, err := net.SplitHostPort(v); err == nil {
+					v = h
+				}
+				if net.ParseIP(v) != nil {
+					return v
+				}
+			}
+		}
+	}
+
+	// 2) X-Forwarded-For: left-most valid IP
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for _, p := range parts {
+			cand := strings.TrimSpace(p)
+			if h, _, err := net.SplitHostPort(cand); err == nil {
+				cand = h
+			}
+			cand = strings.Trim(cand, "[]")
+			if net.ParseIP(cand) != nil {
+				return cand
+			}
+		}
+	}
+
+	// 3) X-Real-IP
+	if xr := r.Header.Get("X-Real-IP"); xr != "" {
+		cand := strings.TrimSpace(xr)
+		if h, _, err := net.SplitHostPort(cand); err == nil {
+			cand = h
+		}
+		cand = strings.Trim(cand, "[]")
+		if net.ParseIP(cand) != nil {
+			return cand
+		}
+	}
+
+	// 4) CF-Connecting-IP (Cloudflare)
+	if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+		cand := strings.TrimSpace(cf)
+		if h, _, err := net.SplitHostPort(cand); err == nil {
+			cand = h
+		}
+		cand = strings.Trim(cand, "[]")
+		if net.ParseIP(cand) != nil {
+			return cand
+		}
+	}
+
+	return ip
 }
 
 // log writes a simple log record with reasons if storage is enabled.
