@@ -229,21 +229,38 @@ There are two ways to make the browser load the script:
 - Option A — copy the file into your app’s public static directory and serve it as you already do. The file you need is at static/js/gocaptcha.js in this module.
 - Option B — mount the embedded handler provided by this library (no copying required).
 
+You can mount it under any URL prefix you like. If you already use Gin’s r.Static("/static", …) and it conflicts, prefer a different top‑level prefix like /static-js/.
+
 net/http:
 
 ```go
+// Mount under the default path
 http.Handle("/static/js/", gocaptcha.JSHandlerWithPrefix("/static/js/"))
 // then in your HTML: <script src="/static/js/gocaptcha.js"></script>
+
+// Or mount under a custom path to avoid conflicts
+http.Handle("/static-js/", gocaptcha.JSHandlerWithPrefix("/static-js/"))
+// then in your HTML: <script src="/static-js/gocaptcha.js"></script>
 ```
 
 Gin:
 
 ```go
+// Default path
 r.Any("/static/js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static/js/")))
+
+// Custom path to avoid clashes with r.Static("/static", ...)
+r.Any("/static-js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static-js/")))
 // optionally also add HEAD if you prefer separate routes
 ```
 
-This simply serves the single file gocaptcha.js at the path /static/js/gocaptcha.js.
+Notes:
+- Update the <script src> in your HTML to match the path you mounted.
+- In Gin, if you insist on mounting under /static/js/ while also using r.Static("/static", ...), ensure the embedded handler route is registered before the broader static route, or just use a distinct prefix like /static-js/ to avoid routing ambiguity.
+
+This simply serves the single file gocaptcha.js at whichever path you mount, e.g. /static/js/gocaptcha.js or /static-js/gocaptcha.js.
+
+Tip: If you mount under "/static-js/", use <script src="/static-js/gocaptcha.js"></script>. The path "/static-js/js/gocaptcha.js" is not needed (and usually wrong). The handler also tolerates that variant for convenience, but it’s best to use the direct file path under your chosen prefix.
 
 ---
 

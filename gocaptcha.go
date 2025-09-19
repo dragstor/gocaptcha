@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"math"
 	"math/rand"
 	"net"
@@ -839,24 +838,41 @@ var embeddedJS embed.FS
 //
 // is reachable by the browser.
 func JSHandler() http.Handler {
-	sub, err := fs.Sub(embeddedJS, "static/js")
+	// Read the embedded JS once and serve it with an explicit JS content type.
+	data, err := embeddedJS.ReadFile("static/js/gocaptcha.js")
 	if err != nil {
-		// Should never happen; return a simple 500 handler if it does.
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "GoCaptcha JS not available", http.StatusInternalServerError)
 		})
 	}
-	return http.FileServer(http.FS(sub))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// After StripPrefix, accept either "gocaptcha.js" or "js/gocaptcha.js" to be forgiving.
+		p := strings.TrimLeft(r.URL.Path, "/")
+		if p != "" && !strings.HasSuffix(p, "gocaptcha.js") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method == http.MethodHead {
+			// For HEAD, only send headers.
+			return
+		}
+		_, _ = w.Write(data)
+	})
 }
 
 // JSHandlerWithPrefix wraps JSHandler with http.StripPrefix for easier mounting.
+// You can use any URL prefix you like (e.g., "/static/js/" or "/static-js/").
 // Example (net/http):
 //
 //	http.Handle("/static/js/", gocaptcha.JSHandlerWithPrefix("/static/js/"))
+//	http.Handle("/static-js/", gocaptcha.JSHandlerWithPrefix("/static-js/"))
 //
 // Example (Gin):
 //
 //	r.Any("/static/js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static/js/")))
+//	r.Any("/static-js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static-js/")))
 func JSHandlerWithPrefix(prefix string) http.Handler {
 	p := strings.TrimRight(prefix, "/") + "/"
 	return http.StripPrefix(p, JSHandler())
