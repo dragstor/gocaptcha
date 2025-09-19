@@ -33,12 +33,17 @@ Import:
 
 ```go
 import (
-"net/http"
-"time"
+    "net/http"
+    "time"
 
-"github.com/dragstor/gocaptcha"
+    "github.com/dragstor/gocaptcha"
 )
 ```
+
+## Go version support
+
+- Minimum supported Go version: 1.20. The module's `go` directive is set to 1.20 to maximize compatibility while staying modern.
+- Rationale: libraries should pin the minimum version they require, not the latest. This avoids breaking users on slightly older toolchains while still allowing everyone on newer Go versions to build and run.
 
 ---
 
@@ -46,36 +51,35 @@ import (
 
 ```go
 cap := gocaptcha.New(gocaptcha.Config{
-ShowBadge:      true,                     // show small lock badge (optional)
-BadgeMessage:   "Protected by GoCaptcha", // badge text
-RateLimitTTL:   time.Minute, // per-IP window
-RateLimitMax:   10,          // max requests/window
-EnableStorage:  true,           // enable SQLite logs + seeding
-DBPath:         "./captcha.db", // defaults to ./captcha.db if empty
-BlockThreshold: -5, // block when score <= threshold
-// Bypass OAuth callbacks:
-SkipPaths: []string{"/auth/", "/oauth2/"},
-// Or a custom predicate:
-// SkipIf: func(r *http.Request) bool { return detectMyOauthCallback(r) },
+    ShowBadge:      true,                     // show small lock badge (optional)
+    BadgeMessage:   "Protected by GoCaptcha", // badge text
+    RateLimitTTL:   time.Minute,              // per-IP window
+    RateLimitMax:   10,                       // max requests/window
+    EnableStorage:  true,                     // enable SQLite logs + seeding
+    DBPath:         "./captcha.db",           // defaults to ./captcha.db if empty
+    BlockThreshold: -5,                       // block when score <= threshold
+    // Bypass OAuth callbacks:
+    SkipPaths: []string{"/auth/", "/oauth2/"},
+    // Or a custom predicate:
+    // SkipIf: func(r *http.Request) bool { return detectMyOauthCallback(r) },
 })
 
-http.HandleFunc("/register", func (w http.ResponseWriter, r *http.Request) {
-if r.Method == http.MethodPost {
-if cap.CheckRequest(r) {
-// Prefer "pretend success" to avoid leaking detection to bots.
-http.Redirect(w, r, "/thanks", http.StatusSeeOther)
-return
-}
-// Handle real registration here…
-w.Write([]byte("ok"))
-return
-}
+http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+    if r.Method == http.MethodPost {
+        if cap.CheckRequest(r) {
+            // Prefer "pretend success" to avoid leaking detection to bots.
+            http.Redirect(w, r, "/thanks", http.StatusSeeOther)
+            return
+        }
+        // Handle real registration here…
+        w.Write([]byte("ok"))
+        return
+    }
 
-// Render the form (example uses raw HTML; templates recommended)
-honeypot := cap.HoneypotField()
-w.Header().Set("Content-Type", "text/html; charset=utf-8")
-_, _ = w.Write([]byte(`
-<!doctype html>
+    // Render the form (example uses raw HTML; templates recommended)
+    honeypot := cap.HoneypotField()
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    _, _ = w.Write([]byte(`<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -112,14 +116,14 @@ You can use GoCaptcha inside Gin handlers:
 
 ```go
 r := gin.Default()
-cap := gocaptcha.New(gocaptcha.Config{ /* … */ })
+cap := gocaptcha.New(gocaptcha.Config{/* … */})
 
-r.POST("/register", func (c *gin.Context) {
-if cap.CheckRequest(c.Request) {
-c.Redirect(http.StatusSeeOther, "/thanks")
-return
-}
-// proceed
+r.POST("/register", func(c *gin.Context) {
+    if cap.CheckRequest(c.Request) {
+        c.Redirect(http.StatusSeeOther, "/thanks")
+        return
+    }
+    // proceed
 })
 ```
 
@@ -132,7 +136,6 @@ Note: cap.Middleware() returns a simple func(*http.Request) bool helper; call Ch
 Use the provided minimal script. It populates ts, js_token, behavior_data and sets the js_captcha cookie.
 
 ```html
-
 <script src="/static/js/gocaptcha.js"></script>
 ```
 
@@ -247,12 +250,12 @@ To ensure OAuth logins (Google/GitHub/etc.) aren’t blocked, configure bypasses
 
 ```go
 cap := gocaptcha.New(gocaptcha.Config{
-SkipPaths: []string{"/auth/", "/oauth2/"},
-// Or provide SkipIf to detect your exact callback shape
-SkipIf: func (r *http.Request) bool {
-q := r.URL.Query()
-return r.Method == http.MethodGet && q.Get("code") != "" && q.Get("state") != ""
-},
+    SkipPaths: []string{"/auth/", "/oauth2/"},
+    // Or provide SkipIf to detect your exact callback shape
+    SkipIf: func(r *http.Request) bool {
+        q := r.URL.Query()
+        return r.Method == http.MethodGet && q.Get("code") != "" && q.Get("state") != ""
+    },
 })
 ```
 
