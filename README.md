@@ -110,20 +110,46 @@ Serve the JS file at /static/js/gocaptcha.js (see Frontend section).
 
 ---
 
-## Optional: Gin usage
+## Gin usage (with templates or inline HTML)
 
-You can use GoCaptcha inside Gin handlers:
+GoCaptcha works with Gin by calling CheckRequest on POST. Important: the library does not and cannot inject HTML.
+You must render the hidden inputs (or let the JS create them), include the JS file, and include the badge HTML
+in your GET page/template.
 
 ```go
 r := gin.Default()
-cap := gocaptcha.New(gocaptcha.Config{/* … */})
+cap := gocaptcha.New(gocaptcha.Config{
+    ShowBadge:    true,
+    BadgeMessage: "Protected by GoCaptcha",
+    // ... other config
+})
+
+r.GET("/register", func(c *gin.Context) {
+    honeypot := cap.HoneypotField()
+    c.Header("Content-Type", "text/html; charset=utf-8")
+    c.String(http.StatusOK, `<!doctype html>
+<html>
+<body>
+  <form method="POST">
+    <input type="hidden" name="ts" id="ts" />
+    <input type="hidden" name="js_token" id="js_token" />
+    <input type="hidden" name="behavior_data" id="behavior_data" />
+    <input type="text" name="` + honeypot + `" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true" />
+    <input type="text" name="name" placeholder="Your name" />
+    <button type="submit">Submit</button>
+  </form>
+  <script src="/static/js/gocaptcha.js"></script>
+  ` + cap.BadgeHTML() + `
+</body>
+</html>`)
+})
 
 r.POST("/register", func(c *gin.Context) {
     if cap.CheckRequest(c.Request) {
         c.Redirect(http.StatusSeeOther, "/thanks")
         return
     }
-    // proceed
+    c.String(http.StatusOK, "ok")
 })
 ```
 
@@ -143,38 +169,101 @@ File contents (already included in this repo at static/js/gocaptcha.js):
 
 ```js
 (function () {
-    const tsField = document.getElementById('ts');
-    const jsToken = document.getElementById('js_token');
-    const behaviorField = document.getElementById('behavior_data');
-    if (!tsField || !jsToken || !behaviorField) return;
-
-    tsField.value = Date.now().toString();
-    jsToken.value = "set_by_js";
+    // Always set the cookie to signal JS is enabled (even if form fields are missing)
     try {
         document.cookie = "js_captcha=enabled; Max-Age=31536000; Path=/; SameSite=Lax";
-    } catch (e) {
+    } catch (e) {}
+
+    // Helper to ensure a hidden input exists in a given form
+    function ensureHidden(form, id) {
+        let el = form.querySelector('#' + id);
+        if (!el) {
+            el = document.createElement('input');
+            el.type = 'hidden';
+            el.name = id;
+            el.id = id;
+            form.appendChild(el);
+        }
+        return el;
     }
 
+    const forms = Array.from(document.querySelectorAll('form'));
+    if (forms.length === 0) return;
+
+    // Shared behavior events buffer
     const events = [];
     document.addEventListener('mousemove', e => {
         events.push({x: e.clientX, y: e.clientY, t: Date.now()});
     });
-    document.addEventListener('keydown', e => {
-        events.push({key: e.key, t: Date.now()});
+    document.addEventListener('keydown', () => {
+        events.push({key: true, t: Date.now()});
     });
-    document.addEventListener('click', e => {
+    document.addEventListener('click', () => {
         events.push({click: true, t: Date.now()});
     });
-    document.querySelector('form').addEventListener('submit', () => {
-        try {
-            behaviorField.value = btoa(JSON.stringify(events.slice(0, 100)));
-        } catch (err) {
-        }
+
+    // Initialize and wire up each form
+    forms.forEach(form => {
+        const tsField = ensureHidden(form, 'ts');
+        const jsToken = ensureHidden(form, 'js_token');
+        const behaviorField = ensureHidden(form, 'behavior_data');
+
+        tsField.value = Date.now().toString();
+        jsToken.value = 'set_by_js';
+
+        form.addEventListener('submit', () => {
+            try {
+                behaviorField.value = btoa(JSON.stringify(events.slice(0, 100)));
+            } catch (err) {}
+        });
     });
 })();
 ```
 
 Note: Legacy files gocaptcha.js and js/gocaptcha.js are deprecated stubs. Use static/js/gocaptcha.js.
+
+## Serving the JS file (Gin and net/http)
+
+There are two ways to make the browser load the script:
+
+- Option A — copy the file into your app’s public static directory and serve it as you already do. The file you need is at static/js/gocaptcha.js in this module.
+- Option B — mount the embedded handler provided by this library (no copying required).
+
+net/http:
+
+```go
+http.Handle("/static/js/", gocaptcha.JSHandlerWithPrefix("/static/js/"))
+// then in your HTML: <script src="/static/js/gocaptcha.js"></script>
+```
+
+Gin:
+
+```go
+r.Any("/static/js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static/js/")))
+// optionally also add HEAD if you prefer separate routes
+```
+
+This simply serves the single file gocaptcha.js at the path /static/js/gocaptcha.js.
+
+---
+
+## Troubleshooting
+
+- Badge not visible on your form even with ShowBadge = true:
+  You must actually render the returned HTML by calling cap.BadgeHTML() in your page/template. Middleware cannot
+  inject markup into your responses. Add something like: ` + "`" + `{{.CaptchaBadgeHTML}}` + "`" + ` (template) or concatenate
+  ` + "`" + `cap.BadgeHTML()` + "`" + ` into your HTML string.
+
+- Immediate redirects and logs show ["missing_ts","missing_js_token","behavior:missing_behavior","missing_js_cookie"]:
+  This means the frontend integration is missing. Ensure that:
+  - Your GET page includes <script src="/static/js/gocaptcha.js"></script> just before </body>.
+  - Your form has hidden fields with ids ts, js_token, behavior_data (the script now auto-creates them if missing).
+  - Cookies are allowed (js_captcha=enabled). If you’re testing on a very strict browser profile or with blocked cookies,
+    the cookie check will add penalties.
+
+- Using Gin or other routers:
+  The middleware/helper only checks requests; it does not render the HTML. Add the script and badge HTML yourself in the
+  GET handler or template as shown in the examples above.
 
 ---
 

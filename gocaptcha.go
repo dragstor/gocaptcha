@@ -4,9 +4,11 @@ package gocaptcha
 
 import (
 	"database/sql"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"math"
 	"math/rand"
 	"net"
@@ -823,4 +825,39 @@ func isSpecialPunct(r rune) bool {
 	default:
 		return false
 	}
+}
+
+// Embedded JS file and helpers to serve it without copying files into your app.
+//
+//go:embed static/js/gocaptcha.js
+var embeddedJS embed.FS
+
+// JSHandler returns an http.Handler that serves the embedded GoCaptcha JS file.
+// Mount it under a URL prefix (usually "/static/js/") so that
+//
+//	/static/js/gocaptcha.js
+//
+// is reachable by the browser.
+func JSHandler() http.Handler {
+	sub, err := fs.Sub(embeddedJS, "static/js")
+	if err != nil {
+		// Should never happen; return a simple 500 handler if it does.
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "GoCaptcha JS not available", http.StatusInternalServerError)
+		})
+	}
+	return http.FileServer(http.FS(sub))
+}
+
+// JSHandlerWithPrefix wraps JSHandler with http.StripPrefix for easier mounting.
+// Example (net/http):
+//
+//	http.Handle("/static/js/", gocaptcha.JSHandlerWithPrefix("/static/js/"))
+//
+// Example (Gin):
+//
+//	r.Any("/static/js/*filepath", gin.WrapH(gocaptcha.JSHandlerWithPrefix("/static/js/")))
+func JSHandlerWithPrefix(prefix string) http.Handler {
+	p := strings.TrimRight(prefix, "/") + "/"
+	return http.StripPrefix(p, JSHandler())
 }
