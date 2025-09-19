@@ -415,9 +415,8 @@ func (c *Captcha) analyzeFormContent(r *http.Request) (int, []string) {
 		delta -= 1
 	}
 
-	// Repeated punctuation
-	repRe := regexp.MustCompile(`([!?*&_\-])\1{4,}`)
-	if repRe.MatchString(msg) {
+	// Repeated punctuation: 5+ of the same from [!?*&_-]
+	if hasRepeatedPunct(msg) {
 		delta -= 1
 		reasons = append(reasons, "repeated_punct")
 	}
@@ -794,4 +793,34 @@ func (c *Captcha) TopReasons(limit int, spamOnly bool) ([]StatReason, error) {
 		arr = arr[:limit]
 	}
 	return arr, nil
+}
+
+// hasRepeatedPunct reports whether the string contains 5 or more of the same
+// punctuation character from the set [!?*&_-] in a row.
+func hasRepeatedPunct(s string) bool {
+	var prev rune
+	count := 0 // number of repeats of prev (consecutive minus one)
+	hasPrev := false
+	for _, r := range s {
+		if hasPrev && r == prev && isSpecialPunct(r) {
+			count++
+			if count >= 4 { // 1 + 4 = 5 identical in a row
+				return true
+			}
+		} else {
+			count = 0
+		}
+		prev = r
+		hasPrev = true
+	}
+	return false
+}
+
+func isSpecialPunct(r rune) bool {
+	switch r {
+	case '!', '?', '*', '&', '_', '-':
+		return true
+	default:
+		return false
+	}
 }
