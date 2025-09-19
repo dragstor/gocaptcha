@@ -1,0 +1,50 @@
+# Go build output
+/bin/
+/build/
+/dist/
+*.exe
+*.test
+*.out
+
+# Go modules
+/go.sum
+
+# Go coverage tool files
+*.coverprofile
+*.cover.out
+
+# Test results
+*.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependency/vendor dirs (if vendored manually)
+vendor/
+
+# JetBrains Rider
+*.iml
+*.ipr
+*.iws
+
+# Cache
+__pycache__/
+*.py[cod]
+.cache/
+*.tmp
+
+# Optional: ignore local SQLite DB if not versioned
+*.db
+*.sqlite
+
+# Optional: local env or config overrides
+.env
+.env.*
+config.local.*
