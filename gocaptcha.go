@@ -41,12 +41,19 @@ type Config struct {
 	// Optional bypass controls to exclude certain requests (e.g., OAuth callbacks) from checks.
 	SkipPaths []string                   // Any request whose URL.Path has one of these prefixes will bypass checks.
 	SkipIf    func(r *http.Request) bool // If provided and returns true, the request bypasses checks.
+
+	// NameFields allows configuring which form fields should be considered as the user's name
+	// for intelligent name validation. If empty, defaults to ["name", "full_name", "fullname", "username"].
+	NameFields []string
 }
 
 type Captcha struct {
 	cfg       Config
 	fieldName string
 	db        *sql.DB
+
+	// set of lower-cased field names to treat as name fields for validation
+	nameFieldsSet map[string]struct{}
 
 	rateMu  sync.Mutex
 	rateMap map[string][]time.Time // IP -> request timestamps
@@ -69,6 +76,20 @@ func New(cfg Config) *Captcha {
 		fieldName: "extra_" + randSeq(6),
 		rateMap:   make(map[string][]time.Time),
 	}
+
+	// Initialize name fields set with defaults if not provided
+	if len(c.cfg.NameFields) == 0 {
+		c.cfg.NameFields = []string{"name", "full_name", "fullname", "username"}
+	}
+	set := make(map[string]struct{}, len(c.cfg.NameFields))
+	for _, n := range c.cfg.NameFields {
+		ln := strings.ToLower(strings.TrimSpace(n))
+		if ln == "" {
+			continue
+		}
+		set[ln] = struct{}{}
+	}
+	c.nameFieldsSet = set
 	if cfg.EnableStorage {
 		if cfg.DBPath == "" {
 			cfg.DBPath = "captcha.db"
@@ -90,6 +111,10 @@ func New(cfg Config) *Captcha {
 			c.db.Exec(`CREATE TABLE IF NOT EXISTS captcha_config (key TEXT PRIMARY KEY, value TEXT)`)
 			// Default config: enforce Latin-only text
 			c.db.Exec(`INSERT OR IGNORE INTO captcha_config (key, value) VALUES ('latin_only','1')`)
+			// Name validation thresholds
+			c.db.Exec(`INSERT OR IGNORE INTO captcha_config (key, value) VALUES ('name_min_length','2')`)
+			c.db.Exec(`INSERT OR IGNORE INTO captcha_config (key, value) VALUES ('name_max_length','30')`)
+			c.db.Exec(`INSERT OR IGNORE INTO captcha_config (key, value) VALUES ('name_min_vowel_ratio','0.15')`)
 			// Seed default spam keywords (library users can add more later)
 			for _, kw := range defaultKeywords() {
 				_, _ = c.db.Exec(`INSERT OR IGNORE INTO spam_keywords (keyword) VALUES (?)`, kw)
@@ -231,7 +256,7 @@ func (c *Captcha) CheckRequest(r *http.Request) bool {
 
 	// 8. JS cookie detection
 	jsCookie, err := r.Cookie("js_captcha")
-	if errors.Is(http.ErrNoCookie, err) {
+	if errors.Is(err, http.ErrNoCookie) {
 		score -= 3
 		reasons = append(reasons, "missing_js_cookie")
 	} else if err != nil || jsCookie.Value != "enabled" {
@@ -309,7 +334,7 @@ func (c *Captcha) clientIP(r *http.Request) string {
 				}
 				v := strings.TrimSpace(kv[1])
 				v = strings.Trim(v, "\"") // strip quotes
-				v = strings.Trim(v, "[]")   // strip IPv6 brackets if present
+				v = strings.Trim(v, "[]") // strip IPv6 brackets if present
 				// Might include port
 				if h, _, err := net.SplitHostPort(v); err == nil {
 					v = h
@@ -443,14 +468,23 @@ func (c *Captcha) analyzeFormContent(r *http.Request) (int, []string) {
 	for k := range r.Form {
 		v := r.FormValue(k)
 		kl := strings.ToLower(k)
-		if kl == "name" || kl == "full_name" || kl == "fullname" || kl == "username" {
-			fields["name"] = v
-		} else if kl == "email" {
+		if kl == "email" {
 			fields["email"] = v
 		} else if kl == "website" || kl == "url" || kl == "site" {
 			fields["website"] = v
 		} else if kl == "message" || kl == "msg" || kl == "comment" || kl == "content" || kl == "bio" || kl == "body" {
 			fields["message"] += "\n" + v
+		}
+	}
+
+	// Determine name using configured precedence: first non-empty configured field wins
+	if fields["name"] == "" {
+		for _, fname := range c.cfg.NameFields {
+			val := strings.TrimSpace(r.FormValue(fname))
+			if val != "" {
+				fields["name"] = val
+				break
+			}
 		}
 	}
 
@@ -514,6 +548,44 @@ func (c *Captcha) analyzeFormContent(r *http.Request) (int, []string) {
 		delta -= 2
 		reasons = append(reasons, "name_contains_url")
 	}
+
+	// Intelligent bot name detection
+	if name != "" {
+		// Check minimum length
+		minLen := c.getConfigInt("name_min_length", 2)
+		if utf8.RuneCountInString(name) < minLen {
+			delta -= 2
+			reasons = append(reasons, "name_too_short")
+		}
+
+		// Check maximum length (suspiciously long random strings)
+		maxLen := c.getConfigInt("name_max_length", 30)
+		if utf8.RuneCountInString(name) > maxLen {
+			delta -= 2
+			reasons = append(reasons, "name_too_long")
+		}
+
+		// Check vowel ratio (bot-generated names often have too few or too many vowels)
+		minVowelRatio := c.getConfigFloat("name_min_vowel_ratio", 0.15)
+		vowelRatio := calculateVowelRatio(name)
+		if vowelRatio < minVowelRatio || vowelRatio > 0.80 {
+			delta -= 2
+			reasons = append(reasons, "name_suspicious_vowel_ratio")
+		}
+
+		// Check for excessive consecutive consonants (3+ in a row)
+		if hasExcessiveConsonants(name) {
+			delta -= 3
+			reasons = append(reasons, "name_excessive_consonants")
+		}
+
+		// Check for random-looking mixed case patterns
+		if hasRandomCasePattern(name) {
+			delta -= 3
+			reasons = append(reasons, "name_random_case_pattern")
+		}
+	}
+
 	// Website must look like a URL if provided
 	if website != "" && !urlRe.MatchString(website) {
 		delta -= 1
@@ -548,6 +620,40 @@ func (c *Captcha) getConfigBool(key string, def bool) bool {
 	}
 	s := strings.TrimSpace(strings.ToLower(v))
 	return s == "1" || s == "true" || s == "yes" || s == "on"
+}
+
+// getConfigInt reads an integer configuration value from the DB with a default fallback.
+func (c *Captcha) getConfigInt(key string, def int) int {
+	if c.db == nil {
+		return def
+	}
+	var v string
+	err := c.db.QueryRow(`SELECT value FROM captcha_config WHERE key = ?`, key).Scan(&v)
+	if err != nil {
+		return def
+	}
+	val, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return def
+	}
+	return val
+}
+
+// getConfigFloat reads a float configuration value from the DB with a default fallback.
+func (c *Captcha) getConfigFloat(key string, def float64) float64 {
+	if c.db == nil {
+		return def
+	}
+	var v string
+	err := c.db.QueryRow(`SELECT value FROM captcha_config WHERE key = ?`, key).Scan(&v)
+	if err != nil {
+		return def
+	}
+	val, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return def
+	}
+	return val
 }
 
 // defaultKeywords returns a seed list of common spammy tokens/phrases.
@@ -617,6 +723,127 @@ func randSeq(n int) string {
 		s[i] = letters[rand.Intn(len(letters))]
 	}
 	return string(s)
+}
+
+// calculateVowelRatio returns the ratio of vowels to total letters in a string.
+func calculateVowelRatio(s string) float64 {
+	vowels := "aeiouAEIOUàáâãäåèéêëìíîïòóôõöùúûüýÿÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜÝ"
+	letterCount := 0
+	vowelCount := 0
+
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			letterCount++
+			if strings.ContainsRune(vowels, r) {
+				vowelCount++
+			}
+		}
+	}
+
+	if letterCount == 0 {
+		return 0
+	}
+	return float64(vowelCount) / float64(letterCount)
+}
+
+// hasExcessiveConsonants checks if the string has 3 or more consecutive consonants,
+// which is uncommon in real names.
+func hasExcessiveConsonants(s string) bool {
+	vowels := "aeiouAEIOUàáâãäåèéêëìíîïòóôõöùúûüýÿÀÁÂÃÄÅÈÉÊËÌÍÎÏÒÓÔÕÖÙÚÛÜÝ"
+	consecutiveConsonants := 0
+
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			if !strings.ContainsRune(vowels, r) {
+				consecutiveConsonants++
+				if consecutiveConsonants >= 3 {
+					return true
+				}
+			} else {
+				consecutiveConsonants = 0
+			}
+		} else {
+			// Reset on non-letter characters (spaces, hyphens, apostrophes)
+			consecutiveConsonants = 0
+		}
+	}
+
+	return false
+}
+
+// hasRandomCasePattern detects suspiciously random uppercase/lowercase mixing.
+// Real names typically have: all lowercase, all uppercase, or Title Case.
+// Bot names often have random patterns like "cBANbTZRkf" or "XddztxdMH".
+func hasRandomCasePattern(s string) bool {
+	if len(s) < 4 {
+		return false // Too short to determine pattern
+	}
+
+	var upperCount, lowerCount, transitions int
+	var prevWasUpper bool
+	firstLetter := true
+	var wordStarts []bool // Track if uppercase letter starts a word
+
+	for i, r := range s {
+		if !unicode.IsLetter(r) {
+			continue
+		}
+
+		isUpper := unicode.IsUpper(r)
+		if isUpper {
+			upperCount++
+			// Check if this is likely a word start (first char or after space/hyphen/apostrophe)
+			if i == 0 || (i > 0 && !unicode.IsLetter(rune(s[i-1]))) {
+				wordStarts = append(wordStarts, true)
+			} else {
+				wordStarts = append(wordStarts, false)
+			}
+		} else {
+			lowerCount++
+		}
+
+		if !firstLetter && isUpper != prevWasUpper {
+			transitions++
+		}
+
+		prevWasUpper = isUpper
+		firstLetter = false
+	}
+
+	totalLetters := upperCount + lowerCount
+	if totalLetters < 4 {
+		return false
+	}
+
+	// Pattern detection:
+	upperRatio := float64(upperCount) / float64(totalLetters)
+
+	// Title Case detection: If most/all uppercase letters are at word starts, it's normal
+	wordStartCount := 0
+	for _, isWordStart := range wordStarts {
+		if isWordStart {
+			wordStartCount++
+		}
+	}
+
+	// If 80%+ of uppercase letters are at word boundaries, it's Title Case (normal)
+	if upperCount > 0 && float64(wordStartCount)/float64(upperCount) >= 0.8 {
+		return false
+	}
+
+	// Many transitions relative to length suggests random pattern
+	// Require 4+ transitions for short names to avoid flagging "John Smith" type names
+	if transitions >= 4 && totalLetters < 15 {
+		return true
+	}
+
+	// Random mix of upper and lower (not all one case, not title case)
+	// More strict: require 35-65% ratio and at least 3 transitions
+	if upperRatio > 0.35 && upperRatio < 0.65 && transitions >= 3 {
+		return true
+	}
+
+	return false
 }
 
 // shouldBypass returns true and a reason if the request should bypass CAPTCHA checks (e.g., OAuth callbacks).

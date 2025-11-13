@@ -324,6 +324,7 @@ Behavior overview:
 - JS/Timing: missing ts/js_token/behavior_data or too-fast submit penalized.
 - Cookies/Headers: missing js_captcha cookie, suspicious UA, or missing headers add mild penalties.
 - Content heuristics: URLs, spam keywords, emoji overuse, repeated punctuation, invalid email/URL, etc.
+- Name validation: intelligent pattern detection catches bot-generated names (excessive consonants, random case mixing, suspicious vowel ratios, unrealistic length).
 
 ---
 
@@ -337,7 +338,7 @@ When EnableStorage is true, the library will create the database (if needed) and
 
 Seeded defaults:
 
-- captcha_config: latin_only = 1 (enabled)
+- captcha_config: latin_only = 1 (enabled), name_min_length = 2, name_max_length = 30, name_min_vowel_ratio = 0.15
 - spam_keywords: a baseline set (e.g., earn, money, cash, crypto, bitcoin, forex, seo, backlink, guest post, sponsor,
   telegram, whatsapp, casino, bet, loan, payday, work from home, adult, porn, viagra, sex, xxx, escort, nft, investment,
   binary options, cheap, discount, limited offer, promo, marketing, followers, likes)
@@ -353,6 +354,11 @@ WHERE key = 'latin_only';
 UPDATE captcha_config
 SET value='1'
 WHERE key = 'latin_only';
+
+-- Adjust name validation thresholds
+UPDATE captcha_config SET value='3' WHERE key = 'name_min_length';  -- require 3+ chars
+UPDATE captcha_config SET value='50' WHERE key = 'name_max_length'; -- allow longer names
+UPDATE captcha_config SET value='0.10' WHERE key = 'name_min_vowel_ratio'; -- stricter vowel check
 ```
 
 Add your own spam keywords:
@@ -366,6 +372,69 @@ VALUES ('a new scam'),
 
 Note: If you previously created captcha_logs with a different schema, you may need to recreate it to include the details
 column.
+
+---
+
+## Intelligent name validation
+
+GoCaptcha automatically detects bot-generated names using pattern analysis. This catches automated registrations with random strings like `cBANbTZRkfyKusOGmKQgKK`, `rfdhgkhjl`, or `XddztxdMHikDFfQcyrM` without blocking legitimate international names.
+
+**Detection methods:**
+
+- **Vowel ratio analysis** — Flags names with unusually low (<15%) or high (>80%) vowel ratios
+- **Excessive consonants** — Detects 3+ consecutive consonants (uncommon in real names)
+- **Random case patterns** — Identifies mixed-case strings like `cBANbTZRkf` while allowing proper Title Case
+- **Length validation** — Penalizes suspiciously short (<2 chars) or long (>30 chars) names
+
+**Penalties:**
+
+- Each signal adds -2 to -3 penalty points
+- Multiple signals combine (e.g., -6 to -8 total for obvious bot names)
+- Legitimate names like "John Smith", "María García", "O'Brien" pass through with 0 penalty
+
+**Logged reasons** (visible in `captcha_logs.details`):
+
+- `name_too_short` — Name below minimum length threshold
+- `name_too_long` — Name exceeds maximum length threshold  
+- `name_suspicious_vowel_ratio` — Vowel percentage outside normal range
+- `name_excessive_consonants` — 3+ consecutive consonants detected
+- `name_random_case_pattern` — Random uppercase/lowercase mixing detected
+
+**Configuration:**
+
+Adjust thresholds in the `captcha_config` table:
+
+```sql
+-- Allow single-character names (default: 2)
+UPDATE captcha_config SET value='1' WHERE key = 'name_min_length';
+
+-- Allow very long names (default: 30)
+UPDATE captcha_config SET value='50' WHERE key = 'name_max_length';
+
+-- Stricter vowel ratio check (default: 0.15 = 15%)
+UPDATE captcha_config SET value='0.10' WHERE key = 'name_min_vowel_ratio';
+```
+
+Use custom form field names (first match wins; order matters):
+
+```go
+cap := gocaptcha.New(gocaptcha.Config{
+    NameFields: []string{"display_name", "author_name", "username"},
+})
+```
+
+This feature works automatically on configured name fields (default: `name`, `full_name`, `fullname`, `username`). The first non-empty field in `NameFields` order is used.
+
+**Analysis:**
+
+Use `TopReasons()` to see which validation rules trigger most often:
+
+```go
+reasons, _ := cap.TopReasons(10, true)
+// Example output: ["name_excessive_consonants", "name_random_case_pattern", ...]
+```
+
+This feature works automatically on form fields named `name`, `full_name`, `fullname`, or `username`.
 
 ---
 
